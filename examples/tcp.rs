@@ -1,12 +1,12 @@
 use serde_json::Value;
 use tokio::net::{TcpListener, TcpStream};
 use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
+use tower_lsp::{lsp_types::*, ServerToClient};
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 #[derive(Debug)]
 struct Backend {
-    client: Client,
+    client: Client<ServerToClient>,
 }
 
 #[tower_lsp::async_trait]
@@ -150,6 +150,6 @@ async fn main() {
     #[cfg(feature = "runtime-agnostic")]
     let (read, write) = (read.compat(), write.compat_write());
 
-    let (service, socket) = LspService::new(|client| Backend { client });
+    let (service, socket) = LspService::new_server(|client| Backend { client });
     Server::new(read, write, socket).serve(service).await;
 }

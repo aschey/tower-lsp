@@ -7,11 +7,11 @@
 //! ```rust
 //! use tower_lsp::jsonrpc::Result;
 //! use tower_lsp::lsp_types::*;
-//! use tower_lsp::{Client, LanguageServer, LspService, Server};
+//! use tower_lsp::{Client, ServerToClient, LanguageServer, LspService, Server};
 //!
 //! #[derive(Debug)]
 //! struct Backend {
-//!     client: Client,
+//!     client: Client<ServerToClient>,
 //! }
 //!
 //! #[tower_lsp::async_trait]
@@ -68,7 +68,7 @@
 //! #   #[cfg(feature = "runtime-agnostic")]
 //! #   let (stdin, stdout) = (stdin.compat(), stdout.compat_write());
 //!
-//!     let (service, socket) = LspService::new(|client| Backend { client });
+//!     let (service, socket) = LspService::new_server(|client| Backend { client });
 //!     Server::new(stdin, stdout, socket).serve(service).await;
 //! }
 //! ```
@@ -82,7 +82,10 @@ pub extern crate lsp_types;
 /// A re-export of [`async-trait`](https://docs.rs/async-trait) for convenience.
 pub use async_trait::async_trait;
 
-pub use self::service::{Client, ClientSocket, ExitedError, LspService, LspServiceBuilder};
+pub use self::service::{
+    Client, ClientSocket, ClientToServer, ExitedError, LspService, LspServiceBuilder,
+    ServerToClient,
+};
 pub use self::transport::{Loopback, Server};
 
 use auto_impl::auto_impl;
@@ -92,7 +95,7 @@ use lsp_types::request::{
 };
 use lsp_types::*;
 use serde_json::Value;
-use tower_lsp_macros::rpc;
+use tower_lsp_macros::{client_rpc, rpc, server_rpc};
 use tracing::{error, warn};
 
 use self::jsonrpc::{Error, Result};
@@ -103,13 +106,35 @@ mod codec;
 mod service;
 mod transport;
 
+/// Trait implemented by language server clients.
+///
+/// This interface allows servers adhering to the [Language Server Protocol] to be implemented in a
+/// safe and easily testable way without exposing the low-level implementation details.
+///
+/// [Language Server Protocol]: https://microsoft.github.io/language-server-protocol/
+
+#[client_rpc]
+#[async_trait]
+#[auto_impl(Arc, Box)]
+pub trait LanguageClient: Send + Sync + 'static {
+    /// test
+    #[rpc(name = "client/registerCapability")]
+    async fn register_capability(&self, params: RegistrationParams) -> Result<()>;
+
+    /// test
+    #[rpc(name = "window/logMessage")]
+    async fn log_message(&self, params: LogMessageParams) {
+        let _ = params;
+    }
+}
+
 /// Trait implemented by language server backends.
 ///
 /// This interface allows servers adhering to the [Language Server Protocol] to be implemented in a
 /// safe and easily testable way without exposing the low-level implementation details.
 ///
 /// [Language Server Protocol]: https://microsoft.github.io/language-server-protocol/
-#[rpc]
+#[server_rpc]
 #[async_trait]
 #[auto_impl(Arc, Box)]
 pub trait LanguageServer: Send + Sync + 'static {

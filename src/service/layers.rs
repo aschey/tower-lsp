@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use super::ExitedError;
 use crate::jsonrpc::{not_initialized_error, Error, Id, Request, Response};
 
-use super::client::Client;
+use super::client::{Client, ServerToClient};
 use super::pending::Pending;
 use super::state::{ServerState, State};
 
@@ -153,11 +153,15 @@ where
 pub struct Exit {
     state: Arc<ServerState>,
     pending: Arc<Pending>,
-    client: Client,
+    client: Client<ServerToClient>,
 }
 
 impl Exit {
-    pub fn new(state: Arc<ServerState>, pending: Arc<Pending>, client: Client) -> Self {
+    pub fn new(
+        state: Arc<ServerState>,
+        pending: Arc<Pending>,
+        client: Client<ServerToClient>,
+    ) -> Self {
         Exit {
             state,
             pending,
@@ -183,7 +187,7 @@ impl<S> Layer<S> for Exit {
 pub struct ExitService<S> {
     state: Arc<ServerState>,
     pending: Arc<Pending>,
-    client: Client,
+    client: Client<ServerToClient>,
     _marker: PhantomData<S>,
 }
 

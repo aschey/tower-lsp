@@ -1,6 +1,8 @@
 //! Service abstraction for language servers.
 
-pub use self::client::{Client, ClientSocket, RequestStream, ResponseSink};
+pub use self::client::{
+    Client, ClientSocket, ClientToServer, RequestStream, ResponseSink, ServerToClient,
+};
 
 pub(crate) use self::pending::Pending;
 pub(crate) use self::state::{ServerState, State};
@@ -16,12 +18,12 @@ use tower::Service;
 use crate::jsonrpc::{
     Error, ErrorCode, FromParams, IntoResponse, Method, Request, Response, Router,
 };
-use crate::LanguageServer;
+use crate::{LanguageClient, LanguageServer};
 
 pub(crate) mod layers;
 
 mod client;
-mod pending;
+pub(crate) mod pending;
 mod state;
 
 /// Error that occurs when attempting to call the language server after it has already exited.
@@ -58,22 +60,29 @@ pub struct LspService<S> {
     state: Arc<ServerState>,
 }
 
+impl<S: Send + Sync + 'static> LspService<S> {
+    /// Returns a reference to the inner server.
+    pub fn inner(&self) -> &S {
+        self.inner.inner()
+    }
+}
+
 impl<S: LanguageServer> LspService<S> {
     /// Creates a new `LspService` with the given server backend, also returning a channel for
     /// server-to-client communication.
-    pub fn new<F>(init: F) -> (Self, ClientSocket)
+    pub fn new_server<F>(init: F) -> (Self, ClientSocket)
     where
-        F: FnOnce(Client) -> S,
+        F: FnOnce(Client<ServerToClient>) -> S,
     {
-        LspService::build(init).finish()
+        LspService::build_server(init).finish()
     }
 
     /// Starts building a new `LspService`.
     ///
     /// Returns an `LspServiceBuilder`, which allows adding custom JSON-RPC methods to the server.
-    pub fn build<F>(init: F) -> LspServiceBuilder<S>
+    pub fn build_server<F>(init: F) -> LspServiceBuilder<S>
     where
-        F: FnOnce(Client) -> S,
+        F: FnOnce(Client<ServerToClient>) -> S,
     {
         let state = Arc::new(ServerState::new());
 
@@ -82,7 +91,7 @@ impl<S: LanguageServer> LspService<S> {
         let pending = Arc::new(Pending::new());
 
         LspServiceBuilder {
-            inner: crate::generated::register_lsp_methods(
+            inner: crate::generated_server::register_lsp_methods(
                 inner,
                 state.clone(),
                 pending.clone(),
@@ -93,14 +102,48 @@ impl<S: LanguageServer> LspService<S> {
             socket,
         }
     }
+}
 
-    /// Returns a reference to the inner server.
-    pub fn inner(&self) -> &S {
-        self.inner.inner()
+impl<S: LanguageClient> LspService<S> {
+    /// Creates a new `LspService` with the given client frontend, also returning a channel for
+    /// client-to-server communication.
+    pub fn new_client<F>(init: F) -> (Self, ClientSocket)
+    where
+        F: FnOnce(Client<ClientToServer>) -> S,
+    {
+        LspService::build_client(init).finish()
+    }
+
+    /// Starts building a new `LspService`.
+    ///
+    /// Returns an `LspServiceBuilder`, which allows adding custom JSON-RPC methods to the client.
+    pub fn build_client<F>(init: F) -> LspServiceBuilder<S>
+    where
+        F: FnOnce(Client<ClientToServer>) -> S,
+    {
+        let state = ServerState::new();
+        state.set(State::Initialized);
+        let state = Arc::new(state);
+
+        let (client, socket) = Client::new(state.clone());
+        let inner = Router::new(init(client.clone()));
+        let pending = Arc::new(Pending::new());
+
+        LspServiceBuilder {
+            inner: crate::generated_client::register_lsp_methods(
+                inner,
+                state.clone(),
+                pending.clone(),
+                client,
+            ),
+            state,
+            pending,
+            socket,
+        }
     }
 }
 
-impl<S: LanguageServer> Service<Request> for LspService<S> {
+impl<S> Service<Request> for LspService<S> {
     type Response = Option<Response>;
     type Error = ExitedError;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
@@ -145,7 +188,7 @@ pub struct LspServiceBuilder<S> {
     socket: ClientSocket,
 }
 
-impl<S: LanguageServer> LspServiceBuilder<S> {
+impl<S: Send + Sync + 'static> LspServiceBuilder<S> {
     /// Defines a custom JSON-RPC request or notification with the given method `name` and handler.
     ///
     /// # Handler varieties
@@ -206,7 +249,7 @@ impl<S: LanguageServer> LspServiceBuilder<S> {
     ///     }
     /// }
     ///
-    /// let (service, socket) = LspService::build(|_| Mock)
+    /// let (service, socket) = LspService::build_server(|_| Mock)
     ///     .custom_method("custom/request", Mock::request)
     ///     .custom_method("custom/requestParams", Mock::request_params)
     ///     .custom_method("custom/notification", Mock::notification)
@@ -290,7 +333,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn initializes_only_once() {
-        let (mut service, _) = LspService::new(|_| Mock);
+        let (mut service, _) = LspService::new_server(|_| Mock);
 
         let request = initialize_request(1);
 
@@ -305,7 +348,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn refuses_requests_after_shutdown() {
-        let (mut service, _) = LspService::new(|_| Mock);
+        let (mut service, _) = LspService::new_server(|_| Mock);
 
         let initialize = initialize_request(1);
         let response = service.ready().await.unwrap().call(initialize).await;
@@ -324,7 +367,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn exit_notification() {
-        let (mut service, _) = LspService::new(|_| Mock);
+        let (mut service, _) = LspService::new_server(|_| Mock);
 
         let exit = Request::build("exit").finish();
         let response = service.ready().await.unwrap().call(exit.clone()).await;
@@ -337,7 +380,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancels_pending_requests() {
-        let (mut service, _) = LspService::new(|_| Mock);
+        let (mut service, _) = LspService::new_server(|_| Mock);
 
         let initialize = initialize_request(1);
         let response = service.ready().await.unwrap().call(initialize).await;
@@ -364,7 +407,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn serves_custom_requests() {
-        let (mut service, _) = LspService::build(|_| Mock)
+        let (mut service, _) = LspService::build_server(|_| Mock)
             .custom_method("custom", Mock::custom_request)
             .finish();
 
@@ -381,7 +424,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn get_inner() {
-        let (service, _) = LspService::build(|_| Mock).finish();
+        let (service, _) = LspService::build_server(|_| Mock).finish();
 
         service
             .inner()

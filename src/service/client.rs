@@ -3,6 +3,7 @@
 pub use self::socket::{ClientSocket, RequestStream, ResponseSink};
 
 use std::fmt::{self, Debug, Display, Formatter};
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -33,6 +34,19 @@ struct ClientInner {
     state: Arc<ServerState>,
 }
 
+pub trait ClientPurpose: Clone {}
+
+/// Client for communicating from the server to the client
+#[derive(Clone, Debug)]
+pub struct ServerToClient;
+
+impl ClientPurpose for ServerToClient {}
+
+/// Client for communicating from the client to the server
+#[derive(Clone, Debug)]
+pub struct ClientToServer;
+impl ClientPurpose for ClientToServer {}
+
 /// Handle for communicating with the language client.
 ///
 /// This type provides a very cheap implementation of [`Clone`] so API consumers can cheaply clone
@@ -41,11 +55,12 @@ struct ClientInner {
 /// It also implements [`tower::Service`] in order to remain independent from the underlying
 /// transport and to facilitate further abstraction with middleware.
 #[derive(Clone)]
-pub struct Client {
+pub struct Client<T: ClientPurpose> {
     inner: Arc<ClientInner>,
+    _phantom: PhantomData<T>,
 }
 
-impl Client {
+impl<T: ClientPurpose> Client<T> {
     pub(super) fn new(state: Arc<ServerState>) -> (Self, ClientSocket) {
         let (tx, rx) = mpsc::channel(1);
         let pending = Arc::new(Pending::new());
@@ -57,6 +72,7 @@ impl Client {
                 pending: pending.clone(),
                 state: state.clone(),
             }),
+            _phantom: Default::default(),
         };
 
         (client, ClientSocket { rx, pending, state })
@@ -75,7 +91,26 @@ impl Client {
     }
 }
 
-impl Client {
+impl Client<ClientToServer> {
+    /// Tells the server to initialize
+    pub async fn initialize(&self, params: InitializeParams) -> jsonrpc::Result<InitializeResult> {
+        self.send_request::<Initialize>(params).await
+    }
+
+    /// Notifies the server that initialization is complete
+    pub async fn initialized(&self) {
+        self.send_notification::<Initialized>(InitializedParams {})
+            .await
+    }
+
+    /// Notifies the server that a document is open
+    pub async fn did_open(&self, text_document: TextDocumentItem) {
+        self.send_notification::<DidOpenTextDocument>(DidOpenTextDocumentParams { text_document })
+            .await
+    }
+}
+
+impl Client<ServerToClient> {
     // Lifecycle Messages
 
     /// Registers a new capability with the client.
@@ -412,6 +447,17 @@ impl Client {
         self.send_request::<ApplyWorkspaceEdit>(ApplyWorkspaceEditParams { edit, label: None })
             .await
     }
+}
+
+impl<T: ClientPurpose> Client<T> {
+    /// Increments the internal request ID counter and returns the previous value.
+    ///
+    /// This method can be used to build custom [`Request`] objects with numeric IDs that are
+    /// guaranteed to be unique every time.
+    pub fn next_request_id(&self) -> Id {
+        let num = self.inner.request_id.fetch_add(1, Ordering::Relaxed);
+        Id::Number(num as i64)
+    }
 
     /// Sends a custom notification to the client.
     ///
@@ -467,6 +513,7 @@ impl Client {
         R: lsp_types::request::Request,
     {
         let id = self.next_request_id();
+
         let request = Request::from_request::<R>(id, params);
 
         let response = match self.clone().call(request).await {
@@ -485,18 +532,7 @@ impl Client {
     }
 }
 
-impl Client {
-    /// Increments the internal request ID counter and returns the previous value.
-    ///
-    /// This method can be used to build custom [`Request`] objects with numeric IDs that are
-    /// guaranteed to be unique every time.
-    pub fn next_request_id(&self) -> Id {
-        let num = self.inner.request_id.fetch_add(1, Ordering::Relaxed);
-        Id::Number(num as i64)
-    }
-}
-
-impl Debug for Client {
+impl<T: ClientPurpose> Debug for Client<T> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.debug_struct("Client")
             .field("tx", &self.inner.tx)
@@ -507,7 +543,7 @@ impl Debug for Client {
     }
 }
 
-impl Service<Request> for Client {
+impl<T: ClientPurpose> Service<Request> for Client<T> {
     type Response = Option<Response>;
     type Error = ExitedError;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
@@ -546,9 +582,9 @@ mod tests {
 
     use super::*;
 
-    async fn assert_client_message<F, Fut>(f: F, expected: Request)
+    async fn assert_client_message<T: ClientPurpose, F, Fut>(f: F, expected: Request)
     where
-        F: FnOnce(Client) -> Fut,
+        F: FnOnce(Client<T>) -> Fut,
         Fut: Future,
     {
         let state = Arc::new(ServerState::new());
