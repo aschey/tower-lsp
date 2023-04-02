@@ -108,6 +108,28 @@ impl Client<ClientToServer> {
         self.send_notification::<DidOpenTextDocument>(DidOpenTextDocumentParams { text_document })
             .await
     }
+
+    /// Requests a document symbol
+    pub async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> jsonrpc::Result<Option<DocumentSymbolResponse>> {
+        self.send_request::<DocumentSymbolRequest>(params).await
+    }
+
+    /// Requests completions
+    pub async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> jsonrpc::Result<Option<CompletionResponse>> {
+        self.send_request::<Completion>(params).await
+    }
+
+    /// Notifies server about document changes
+    pub async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        self.send_notification::<DidChangeTextDocument>(params)
+            .await
+    }
 }
 
 impl Client<ServerToClient> {
